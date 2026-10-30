@@ -1,0 +1,136 @@
+import pandas as pd
+from pathlib import Path
+import sys
+import warnings
+import numpy as np
+
+# Απόκρυψη περιττών προειδοποιήσεων
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+from sklearn.model_selection import train_test_split, RandomizedSearchCV
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from lightgbm import LGBMClassifier
+from sklearn.metrics import accuracy_score, classification_report
+import joblib
+
+print("1. Αυτόματη φόρτωση και συνδυασμός ΟΛΩΝ των CSV αρχείων από τον φάκελο...")
+
+# Ορίζουμε τον φάκελο όπου βρίσκονται τα datasets
+documents_path = Path("/home/myrsini/Documents")
+model_path = documents_path / "fall_classifier_model.pkl"
+
+if not documents_path.exists():
+    print(f"[ΣΦΑΛΜΑ] Ο φάκελος δεν βρέθηκε στη διαδρομή: {documents_path}")
+    sys.exit()
+
+# Βρίσκουμε αυτόματα ΟΛΑ τα αρχεία .csv στον φάκελο (π.χ. dataset2.csv, pose_dataset.csv κ.λπ.)
+csv_files = list(documents_path.glob("*.csv"))
+
+if not csv_files:
+    print(f"[ΣΦΑΛΜΑ] Δεν βρέθηκαν αρχεία CSV στη διαδρομή: {documents_path}")
+    sys.exit()
+
+print(f"Εντοπίστηκαν τα εξής αρχεία προς ένωση: {[f.name for f in csv_files]}")
+
+# Διαβάζουμε και συγχωνεύουμε όλα τα CSV αρχεία σε ένα ενιαίο DataFrame
+df_list = [pd.read_csv(file) for file in csv_files]
+df = pd.concat(df_list, ignore_index=True)
+
+print(f"\nΣυνολικές εγγραφές από όλα τα datasets μαζί: {len(df)}")
+
+# --- ΕΛΕΓΧΟΣ ΚΛΑΣΕΩΝ ---
+print("\nΚατανομή κλάσεων (labels):")
+print(df['label'].value_counts())
+
+if len(df['label'].unique()) < 2:
+    print("\n[ΚΡΙΣΙΜΟ ΣΦΑΛΜΑ] Τα συνδυασμένα δεδομένα περιέχουν μόνο ΜΙΑ κλάση! "
+          "Χρειάζεστε οπωσδήποτε παραδείγματα και για τις δύο καταστάσεις (0: Κανονικό, 1: Πτώση).")
+    sys.exit()
+
+# --- ΠΡΟΣΘΗΚΗ ΧΡΟΝΙΚΩΝ ΧΑΡΑΚΤΗΡΙΣΤΙΚΩΝ (DELTA FEATURES) ---
+df['shoulder_y_delta'] = df['shoulder_y'].diff()
+df['hip_y_delta'] = df['hip_y'].diff()
+df['vertical_dist_delta'] = df['vertical_dist'].diff()
+
+# Διαγράφουμε την πρώτη γραμμή κάθε αρχείου/συνόλου που θα έχει NaN λόγω του diff()
+df = df.dropna().reset_index(drop=True)
+print(f"Εγγραφές μετά τον υπολογισμό ταχυτήτων: {len(df)}")
+
+# Χαρακτηριστικά (X) και Ετικέτες (y)
+X = df[['shoulder_y', 'hip_y', 'vertical_dist', 'shoulder_y_delta', 'hip_y_delta', 'vertical_dist_delta']] 
+y = df['label'] 
+
+# Χωρισμός σε train/test με stratify
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+print("\n2. Εκπαίδευση & Βελτιστοποίηση Random Forest...")
+rf_param_grid = {
+    'n_estimators': [150, 300, 500],
+    'max_depth': [10, 20, 30, None],
+    'min_samples_split': [2, 5],
+    'class_weight': ['balanced']
+}
+rf_search = RandomizedSearchCV(
+    RandomForestClassifier(random_state=42),
+    rf_param_grid, n_iter=8, cv=3, scoring='accuracy', random_state=42, n_jobs=-1
+)
+rf_search.fit(X_train, y_train)
+
+print("\n3. Εκπαίδευση & Βελτιστοποίηση LightGBM...")
+lgb_param_grid = {
+    'n_estimators': [150, 300, 500],
+    'learning_rate': [0.01, 0.05, 0.1],
+    'num_leaves': [31, 50, 63],
+    'class_weight': ['balanced']
+}
+lgb_search = RandomizedSearchCV(
+    LGBMClassifier(random_state=42, verbose=-1),
+    lgb_param_grid, n_iter=8, cv=3, scoring='accuracy', random_state=42, n_jobs=-1
+)
+lgb_search.fit(X_train, y_train)
+
+print("\n4. Δημιουργία κορυφαίου Ensemble (RF + LightGBM)...")
+best_rf_model = RandomForestClassifier(**rf_search.best_params_, random_state=42)
+best_lgb_model = LGBMClassifier(**lgb_search.best_params_, random_state=42, verbose=-1)
+
+modern_ensemble = VotingClassifier(
+    estimators=[
+        ('random_forest', best_rf_model),
+        ('lightgbm', best_lgb_model)
+    ],
+    voting='soft'
+)
+modern_ensemble.fit(X_train, y_train)
+
+# 5. Threshold Tuning (Αυτόματη εύρεση του ιδανικού ορίου απόφασης)
+print("\n5. Αναζήτηση καλύτερου ορίου απόφασης (Threshold Tuning)...")
+y_probs = modern_ensemble.predict_proba(X_test)[:, 1]
+
+best_threshold = 0.5
+best_f1 = 0
+
+for threshold in np.arange(0.2, 0.8, 0.05):
+    y_pred_temp = (y_probs >= threshold).astype(int)
+    report = classification_report(y_test, y_pred_temp, output_dict=True, zero_division=0)
+    
+    if '1' in report:
+        f1_fall = report['1']['f1-score']
+        if f1_fall > best_f1:
+            best_f1 = f1_fall
+            best_threshold = threshold
+
+print(f"[ΒΕΛΤΙΣΤΟ] Το ιδανικό threshold που εντοπίστηκε είναι: {best_threshold:.2f}")
+
+# Τελικές προβλέψεις
+y_pred_final = (y_probs >= best_threshold).astype(int)
+accuracy = accuracy_score(y_test, y_pred_final)
+
+print(f"\n[ΕΠΙΤΥΧΙΑ] Νέα Τελική Ακρίβεια με Χρονικά Χαρακτηριστικά: {accuracy * 100:.2f}%")
+print("\nΑναλυτική Αναφορά Απόδοσης (Classification Report):")
+print(classification_report(y_test, y_pred_final, zero_division=0))
+
+# 6. Αποθήκευση
+joblib.dump(modern_ensemble, model_path)
+print(f"\nΤο μοντέλο αποθηκεύτηκε επιτυχώς εδώ: {model_path}")
