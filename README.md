@@ -1,6 +1,14 @@
 # CHIHUAHUA Robot
 
+# Project was developed by a team of Biomedical Engineering Students with supervision and guidance of ACIMA LAB of UNIWA
+
+# Team Members
+Tsele Panagiota, Venolia Aggeliki, Myrsini Moraiti, Sarafis Vasileios, Sidiropoulos Kosmas, Tsouko Maria-Anna, Zisi Sofia
+# Supervisor
+Dr. Panagiotou Dimitrios, faculty of Biomedical Engineering, ACIMA LAB, UNIWA.
+
 Cynoid Health Intelligence for Home Ubiquitous Assistance, Hazard Updates and Alert
+
 
 CHIHUAHUA is an open-source, AI-powered bionic robot dog based on the WaveGo 12-DOF platform. Designed as an autonomous medical companion for the elderly and patients, it leverages a Raspberry Pi 4B and an ESP32 to provide real-time patient monitoring, fall detection, and medical assistance.
 
